@@ -12,6 +12,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { apiPath } from "@/lib/api-path";
+import { inviteUrl } from "@/lib/invite-link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { EditorView } from "@codemirror/view";
 import { useSession, getAuthHeaders } from "@/lib/use-session";
@@ -37,7 +38,7 @@ import { useDocPersistence } from "@/lib/use-doc-persistence";
 export default function WorkspaceShell() {
   const searchParams = useSearchParams();
   const documentId = searchParams.get("doc");
-  const inviteProjectId = searchParams.get("invite");
+  const inviteToken = searchParams.get("invite");
 
   const currentDocumentId = useUiStore((s) => s.currentDocumentId);
   const activeMainBlock = useUiStore((s) => s.activeMainBlock);
@@ -65,17 +66,17 @@ export default function WorkspaceShell() {
 
   const { actor, loading } = useSession();
 
-  // Invite link — ?invite=prj_x means "auto-join this project as viewer".
-  // Any authenticated user can redeem; the invite route adds them
-  // and the workspace reloads to show the new membership.
+  // Invite link — ?invite=<signed token> means "auto-join this project as
+  // viewer". The token vouches for the project; the route verifies it before
+  // creating a membership.
   useEffect(() => {
-    if (!inviteProjectId || !actor) return;
+    if (!inviteToken || !actor) return;
     const join = async () => {
       try {
         await fetch(apiPath("/api/invite/redeem"), {
           method: "POST",
           headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
-          body: JSON.stringify({ projectId: inviteProjectId }),
+          body: JSON.stringify({ token: inviteToken }),
         });
       } catch {
         /* already a member or invite failed — still try to open */
@@ -87,7 +88,7 @@ export default function WorkspaceShell() {
       window.location.reload();
     };
     void join();
-  }, [inviteProjectId, actor]);
+  }, [inviteToken, actor]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && currentDocumentId) {
@@ -1030,8 +1031,27 @@ function SidePanel({
         {/* Invite link */}
         <button
           onClick={() => {
-            const url = `${window.location.origin}/?invite=${projectId}`;
-            void navigator.clipboard.writeText(url);
+            // Ask the server for a signed token first: the link is the
+            // capability now, and a bare project id is not one. inviteUrl then
+            // keeps the deployment base path — a bare origin+"/?invite=…"
+            // 404s behind the artifact gateway.
+            const mint = async () => {
+              try {
+                const res = await fetch(apiPath(`/api/projects/${projectId}/invite`), {
+                  method: "POST",
+                  headers: getAuthHeaders(),
+                });
+                if (!res.ok) return;
+                const { token } = (await res.json()) as { token?: string };
+                if (!token) return;
+                await navigator.clipboard.writeText(
+                  inviteUrl(token, window.location.origin)
+                );
+              } catch {
+                /* clipboard or mint failed — nothing copied */
+              }
+            };
+            void mint();
           }}
           className="mt-2 w-full rounded-md border border-border/60 px-2 py-1 text-[10px] font-medium text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
           title="复制邀请链接"
