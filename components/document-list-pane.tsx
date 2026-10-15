@@ -106,6 +106,10 @@ export default function DocumentListPane() {
   const [renameFileId, setRenameFileId] = useState("");
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [contactsLoading, setContactsLoading] = useState(false);
+  // Distinguishes "the roster could not be read" from "the roster is empty".
+  // They used to render identically, which blamed the user's CatsCo account for
+  // what was actually a broken deployment.
+  const [contactsError, setContactsError] = useState<string | null>(null);
   const [addMemberMode, setAddMemberMode] = useState<"picker" | "manual">("picker");
   const [busyActions, setBusyActions] = useState<Set<string>>(new Set());
   // list | table — persisted across sessions
@@ -168,9 +172,21 @@ export default function DocumentListPane() {
     // Also load contacts (friends + bots) so the picker can render.
     setContactsLoading(true);
     fetch(apiPath("/api/friends"), { headers: getAuthHeaders() })
-      .then((r) => (r.ok ? r.json() : { users: [], agents: [] }))
-      .then((d) => setContacts([...(d.users ?? []), ...(d.agents ?? [])]))
-      .catch(() => setContacts([]))
+      .then(async (r) => {
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          throw new Error(body?.detail || body?.error || `HTTP ${r.status}`);
+        }
+        return body as { users?: Contact[]; agents?: Contact[] };
+      })
+      .then((d) => {
+        setContacts([...(d.users ?? []), ...(d.agents ?? [])]);
+        setContactsError(null);
+      })
+      .catch((err) => {
+        setContacts([]);
+        setContactsError(err instanceof Error ? err.message : "加载失败");
+      })
       .finally(() => setContactsLoading(false));
   }, [selected, showMembers]);
 
@@ -1026,6 +1042,16 @@ export default function DocumentListPane() {
                       {contactsLoading ? (
                         <div className="text-[11px] text-muted-foreground">
                           载入联系人…
+                        </div>
+                      ) : contactsError ? (
+                        // A failed read is not an empty roster. Saying "you have no
+                        // friends" here would blame the user's CatsCo account for
+                        // what is actually a deployment-side problem.
+                        <div className="rounded-md border border-dashed border-destructive/40 p-3 text-[11px] text-muted-foreground">
+                          读不到 CatsCo 好友列表：{contactsError}
+                          <div className="mt-1 text-[10px] opacity-70">
+                            这是部署侧的问题，不是你账号里没有好友。
+                          </div>
                         </div>
                       ) : contacts.length === 0 ? (
                         <div className="rounded-md border border-dashed border-border/60 p-3 text-[11px] text-muted-foreground">

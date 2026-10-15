@@ -86,18 +86,29 @@ export function addPendingEdit(
 
 export function listPendingEdits(
   db: DatabaseSync,
-  input: { projectId: string; userId: string; fileId?: string }
+  input: { projectId: string; userId?: string; authorId?: string; fileId?: string }
 ): PendingEditRow[] {
-  const sql = input.fileId
-    ? `SELECT * FROM pending_edits
-       WHERE project_id = ? AND user_id = ? AND file_id = ? AND status = 'pending'
+  // Two sides of the same queue. A reviewer asks "what is waiting for me"; an
+  // author (typically an agent) asks "did my proposals land". Filtering only by
+  // reviewer made the second question unanswerable from the API — an agent that
+  // had just proposed two edits was told the queue was empty.
+  const column = input.authorId ? "author_id" : "user_id";
+  const owner = input.authorId ?? input.userId;
+  if (!owner) return [];
+
+  const clauses = ["project_id = ?", `${column} = ?`, "status = 'pending'"];
+  const values: string[] = [input.projectId, owner];
+  if (input.fileId) {
+    clauses.push("file_id = ?");
+    values.push(input.fileId);
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT * FROM pending_edits WHERE ${clauses.join(" AND ")}
        ORDER BY created_at ASC`
-    : `SELECT * FROM pending_edits
-       WHERE project_id = ? AND user_id = ? AND status = 'pending'
-       ORDER BY created_at ASC`;
-  const rows = (input.fileId
-    ? db.prepare(sql).all(input.projectId, input.userId, input.fileId)
-    : db.prepare(sql).all(input.projectId, input.userId)) as Array<{
+    )
+    .all(...values) as Array<{
     id: string;
     project_id: string;
     file_id: string;
@@ -110,6 +121,57 @@ export function listPendingEdits(
     created_at: number;
     updated_at: number;
   }>;
+  return rows.map((r) => ({
+    id: r.id,
+    projectId: r.project_id,
+    fileId: r.file_id,
+    userId: r.user_id,
+    authorId: r.author_id,
+    authorName: r.author_name,
+    description: r.description,
+    blocks: JSON.parse(r.blocks) as EditBlock[],
+    status: r.status as PendingEditRow["status"],
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  }));
+}
+
+/**
+ * Every pending edit in a project, regardless of who proposed or reviews it.
+ *
+ * For the owner's view of the queue: they are the one who has to clear it, and
+ * a queue they cannot enumerate in one call is not a queue they can trust.
+ */
+export function listProjectPendingEdits(
+  db: DatabaseSync,
+  input: { projectId: string; fileId?: string }
+): PendingEditRow[] {
+  const clauses = ["project_id = ?", "status = 'pending'"];
+  const values: string[] = [input.projectId];
+  if (input.fileId) {
+    clauses.push("file_id = ?");
+    values.push(input.fileId);
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT * FROM pending_edits WHERE ${clauses.join(" AND ")}
+       ORDER BY created_at ASC`
+    )
+    .all(...values) as Array<{
+    id: string;
+    project_id: string;
+    file_id: string;
+    user_id: string;
+    author_id: string;
+    author_name: string | null;
+    description: string | null;
+    blocks: string;
+    status: string;
+    created_at: number;
+    updated_at: number;
+  }>;
+
   return rows.map((r) => ({
     id: r.id,
     projectId: r.project_id,

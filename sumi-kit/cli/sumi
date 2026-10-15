@@ -120,17 +120,39 @@ def cmd_list_pending(a: argparse.Namespace) -> None:
 
 
 def cmd_pending_status(a: argparse.Namespace) -> None:
-    r = _req("GET", f"/api/pending-edits?projectId={a.project}")
-    edits = r.get("pendingEdits", [])
+    """Summarise the review queue for this project.
+
+    The route returns edits under `edits` and names the file `fileId`; this used
+    to read `pendingEdits` / `filePath`, so it printed "0 pending" no matter how
+    many edits were waiting. That is worse than an error: it reads as an empty
+    queue, and nothing prompts you to look further.
+
+    Default scope is `authored`: run from an agent's credential, the useful
+    question is "did the edits I proposed land", not "is anyone reviewing me".
+    """
+    scope = getattr(a, "scope", None) or "authored"
+    r = _req("GET", f"/api/pending-edits?projectId={a.project}&scope={scope}")
+    edits = r.get("edits", [])
     pending = [e for e in edits if e.get("status") == "pending"]
-    print(f"{len(pending)} pending · {len(edits)} total")
+    print(f"{len(pending)} pending · {len(edits)} total · scope={scope}")
+
+    me = _req("GET", "/api/auth/me")
+    mine = (me.get("actor") or {}).get("id")
     for e in pending:
         for b in e.get("blocks", []):
-            print(f"  {e.get('filePath','?')} L{b.get('startLine')}-{b.get('endLine')}: {(e.get('description') or '')[:60]}")
+            author = e.get("authorId")
+            who = "我" if author == mine else str(author)
+            print(
+                f"  {e.get('id')} {e.get('fileId','?')} "
+                f"L{b.get('startLine')}-{b.get('endLine')} by {who}: "
+                f"{(e.get('description') or '')[:60]}"
+            )
 
 
 def cmd_apply_edit(a: argparse.Namespace) -> None:
-    _pp(_req("POST", "/api/edits/apply", {"id": a.id}))
+    # The route reads `editId` from the body; it can resolve the project, file
+    # and blocks from the stored edit, so the id is the whole request.
+    _pp(_req("POST", "/api/edits/apply", {"editId": a.id}))
 
 
 def cmd_reject_edit(a: argparse.Namespace) -> None:
@@ -165,8 +187,27 @@ def cmd_page_state(a: argparse.Namespace) -> None:
 
 
 def cmd_onboard(a: argparse.Namespace) -> None:
-    params = f"fileId={urllib.request.quote(a.file)}" if a.file else ""
-    r = _req("GET", f"/api/projects/{a.project}/agent-setup?{params}")
+    """Fetch the setup prompt for this project.
+
+    The route requires `subjectId` (an `a*` principal) because the prompt is
+    written for a specific agent: it names you, states your role, and tells you
+    whether you can write. Without the parameter the route answers 400, so the
+    command never worked for the one audience it exists for. The caller's own
+    subject is exactly what it wants, so it is read from the current credential
+    rather than asked for.
+    """
+    me = _req("GET", "/api/auth/me")
+    subject = (me.get("actor") or {}).get("id") or ""
+    if not subject.startswith("a"):
+        raise SystemExit(
+            "get-onboard-prompt needs an agent credential (subject a*); "
+            f"this one resolves to {subject or 'nothing'}"
+        )
+
+    parts = [f"subjectId={urllib.request.quote(subject)}"]
+    if a.file:
+        parts.append(f"fileId={urllib.request.quote(a.file)}")
+    r = _req("GET", f"/api/projects/{a.project}/agent-setup?{'&'.join(parts)}")
     if a.raw:
         print(r.get("instructions", ""))
     else:
@@ -174,8 +215,75 @@ def cmd_onboard(a: argparse.Namespace) -> None:
 
 
 def cmd_heartbeat(a: argparse.Namespace) -> None:
-    # Stub — no heartbeat endpoint yet; agents that want presence can call /api/auth/me
-    _pp(_req("GET", "/api/auth/me"))
+    """Report whether this agent is actually present.
+
+    Presence in Sumi is awareness: a client shows as online while it holds a
+    live Yjs room connection, and disappears when it closes. A CLI cannot fake
+    that by calling an HTTP endpoint — there is no heartbeat route, and inventing
+    one would report liveness the editor cannot see.
+
+    So this reports the truth instead: who the credential is, and which clients
+    the server currently considers connected. With --project it also says
+    whether *you* are among them, which is the question an agent asking
+    "am I online?" actually has.
+    """
+    me = _req("GET", "/api/auth/me")
+    actor = me.get("actor") or {}
+    subject = actor.get("id") or ""
+    out: dict[str, Any] = {
+        "subject": subject,
+        "kind": actor.get("kind"),
+        "name": actor.get("name"),
+    }
+
+    if a.project:
+        state = _req("GET", f"/api/page-state/{urllib.request.quote(a.project)}")
+        members = state.get("members") or []
+        sessions = [
+            {
+                "clientId": m.get("clientId"),
+                "user": (m.get("user") or {}).get("id"),
+                "kind": m.get("userKind"),
+                "file": m.get("fileId"),
+                "foreground": (m.get("pageState") or {}).get("foreground"),
+            }
+            for m in members
+        ]
+        out["connectedClients"] = len(sessions)
+        out["sessions"] = sessions
+        # Only a live room connection counts — that is what others see.
+        out["present"] = any(s["user"] == subject for s in sessions)
+        if not out["present"]:
+            out["note"] = (
+                "not present: no live room connection for this subject. "
+                "Open a Yjs room (sumi connect, co-edit, or an agent-client "
+                "socket) to appear online in the editor."
+            )
+
+    if a.json:
+        _pp(out)
+        return
+
+    print(f"{out.get('kind')}={subject} {out.get('name') or ''}".strip())
+    if a.project:
+        print(f"present: {'yes' if out.get('present') else 'no'} · connected clients: {out.get('connectedClients')}")
+        for s in out.get("sessions") or []:
+            print(f"  {s['kind']}={s['user']} {s['file']} foreground={s['foreground']}")
+
+
+def cmd_list_sessions(_: argparse.Namespace) -> None:
+    """List every project with the clients currently connected to it."""
+    projects = (_req("GET", "/api/projects").get("projects") or [])
+    for p in projects:
+        pid = p.get("id")
+        if not pid:
+            continue
+        state = _req("GET", f"/api/page-state/{urllib.request.quote(pid)}")
+        members = state.get("members") or []
+        print(f"{pid} {p.get('name','')} clients={len(members)}")
+        for m in members:
+            user = (m.get("user") or {}).get("id")
+            print(f"  {m.get('userKind')}={user} {m.get('fileId')}")
 
 
 def cmd_intents(a: argparse.Namespace) -> None:
@@ -571,12 +679,13 @@ def main() -> None:
     s = sub.add_parser("read-doc"); s.add_argument("--project", required=True); s.add_argument("--file", required=True); s.add_argument("--raw", action="store_true"); s.set_defaults(fn=cmd_read_doc)
     s = sub.add_parser("propose-edit"); s.add_argument("--project", required=True); s.add_argument("--file", required=True); s.add_argument("--blocks", required=True); s.add_argument("--desc"); s.set_defaults(fn=cmd_propose_edit)
     s = sub.add_parser("list-pending"); s.add_argument("--project", required=True); s.set_defaults(fn=cmd_list_pending)
-    s = sub.add_parser("pending-status"); s.add_argument("--project", required=True); s.set_defaults(fn=cmd_pending_status)
+    s = sub.add_parser("pending-status"); s.add_argument("--project", required=True); s.add_argument("--scope", choices=["reviewing","authored","both","all"], default="authored", help="whose queue: mine to review, mine as author, both, or all (owner)"); s.set_defaults(fn=cmd_pending_status)
     s = sub.add_parser("page-state"); s.add_argument("--project", required=True); s.add_argument("--compact", action="store_true", help="one line per member"); s.set_defaults(fn=cmd_page_state)
     s = sub.add_parser("apply-edit"); s.add_argument("--id", required=True); s.set_defaults(fn=cmd_apply_edit)
     s = sub.add_parser("reject-edit"); s.add_argument("--id", required=True); s.set_defaults(fn=cmd_reject_edit)
     s = sub.add_parser("get-onboard-prompt"); s.add_argument("--project", required=True); s.add_argument("--file"); s.add_argument("--raw", action="store_true"); s.set_defaults(fn=cmd_onboard)
-    s = sub.add_parser("heartbeat"); s.set_defaults(fn=cmd_heartbeat)
+    s = sub.add_parser("heartbeat"); s.add_argument("--project"); s.add_argument("--json", action="store_true"); s.set_defaults(fn=cmd_heartbeat)
+    s = sub.add_parser("list-sessions"); s.set_defaults(fn=cmd_list_sessions)
     s = sub.add_parser("intents")
     s.add_argument("--project", required=True)
     s.add_argument("--status", choices=["open","claimed","answered","closed"])

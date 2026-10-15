@@ -475,9 +475,21 @@ const server = http.createServer(async (req, res) => {
       };
       const docData = await resolveDocData(roomName);
       if (!docData) {
+        // Nothing was written, and the caller must be able to tell.
+        //
+        // This used to answer `{success: true}` with a message saying no update
+        // was needed. A caller reading `success` concluded the edit had landed
+        // and marked it applied, while the document was untouched: with no
+        // client holding the room open there is no in-memory doc to mutate, and
+        // a line-based block cannot be applied without one. `applied: 0` plus
+        // `inMemory: false` gives the caller what it needs to fall back to the
+        // persisted blob instead of reporting a success that did not happen.
         sendJson(res, 200, {
-          success: true,
-          message: "Document not in memory, no update needed",
+          success: false,
+          inMemory: false,
+          applied: 0,
+          message:
+            "Document not in memory; no blocks applied. Apply to the persisted content instead.",
         });
         return;
       }
@@ -523,8 +535,21 @@ const server = http.createServer(async (req, res) => {
           }
         });
         console.log(`✏️ blocks applied: ${roomName}`);
+        sendJson(res, 200, {
+          success: true,
+          inMemory: true,
+          applied: Array.isArray(blocks) ? blocks.length : 0,
+          roomName,
+        });
+      } else {
+        sendJson(res, 200, {
+          success: false,
+          inMemory: true,
+          applied: 0,
+          roomName,
+          message: "No blocks supplied",
+        });
       }
-      sendJson(res, 200, { success: true, roomName });
     } catch (err) {
       console.error("❌ POST /doc failed:", err);
       sendJson(res, 500, { error: "Failed to update document" });

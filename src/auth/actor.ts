@@ -33,6 +33,14 @@ import { upsertSubject } from "./identity";
 export type ActorKind = "user" | "agent";
 export type EffectiveRole = "owner" | "editor" | "viewer" | null;
 
+/**
+ * CatsCo ApiKey prefix (`cc_{hex uid}_{random}`).
+ *
+ * Keys are self-describing, so a credential's type can be decided from its
+ * shape. See extractCredential for why that matters on the Bearer path.
+ */
+const APIKEY_PREFIX = "cc_";
+
 export interface Actor {
   kind: ActorKind;
   /** Sumi subject id — "u{uid}" or "a{uid}" */
@@ -63,7 +71,18 @@ export function extractCredential(
   const auth = (req.headers.authorization as string | undefined) || "";
   if (auth.startsWith("Bearer ")) {
     const t = auth.slice(7).trim();
-    if (t) return { kind: "jwt", token: t };
+    if (t) {
+      // A `cc_*` ApiKey arriving as `Bearer` is an ApiKey, not a JWT.
+      //
+      // It is classified here rather than left to fail JWT verification because
+      // that is how every client in the ecosystem sends it: sumi-kit's CLI takes
+      // SUMI_API_KEY and emits `Authorization: Bearer $SUMI_API_KEY`, and the
+      // agent setup guide tells agents to do the same. Treating it as a JWT made
+      // every documented agent credential fail with a bare 401 that looked like a
+      // bad key.
+      if (t.startsWith(APIKEY_PREFIX)) return { kind: "apikey", token: t };
+      return { kind: "jwt", token: t };
+    }
   }
   if (auth.startsWith("ApiKey ")) {
     const t = auth.slice(7).trim();

@@ -15,6 +15,7 @@ import { actorFromRequest } from "@/lib/http-auth";
 import {
   addPendingEdit,
   listPendingEdits,
+  listProjectPendingEdits,
   getPendingEdit,
   updatePendingEditStatus,
   deletePendingEdit,
@@ -82,6 +83,9 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const projectId = url.searchParams.get("projectId") || "";
   const fileId = url.searchParams.get("fileId") || undefined;
+  // Which side of the queue to read. Default stays "reviewing" so the editor's
+  // decorations keep showing exactly what they showed before.
+  const scope = url.searchParams.get("scope") || "reviewing";
 
   if (!projectId) {
     return Response.json({ error: "projectId required" }, { status: 400 });
@@ -92,11 +96,34 @@ export async function GET(request: Request) {
   }
 
   const db = await getDb();
-  const edits = listPendingEdits(db, {
-    projectId,
-    userId: ctx.actor.id,
-    fileId,
-  });
+  const base = { projectId, fileId };
+
+  let edits;
+  if (scope === "authored") {
+    edits = listPendingEdits(db, { ...base, authorId: ctx.actor.id });
+  } else if (scope === "both") {
+    // An agent wants to see its own proposals and the ones awaiting its review.
+    const merged = new Map<string, ReturnType<typeof listPendingEdits>[number]>();
+    for (const e of listPendingEdits(db, { ...base, userId: ctx.actor.id })) {
+      merged.set(e.id, e);
+    }
+    for (const e of listPendingEdits(db, { ...base, authorId: ctx.actor.id })) {
+      merged.set(e.id, e);
+    }
+    edits = [...merged.values()].sort((a, b) => a.createdAt - b.createdAt);
+  } else if (scope === "all") {
+    // Owner's view: every pending edit in the project.
+    if (ctx.role !== "owner") {
+      return Response.json(
+        { error: "owner role required for scope=all" },
+        { status: 403 }
+      );
+    }
+    edits = listProjectPendingEdits(db, { ...base });
+  } else {
+    edits = listPendingEdits(db, { ...base, userId: ctx.actor.id });
+  }
+
   return Response.json({ edits });
 }
 
@@ -219,10 +246,16 @@ export async function DELETE(request: Request) {
   if (!ctx) {
     return Response.json({ error: "forbidden" }, { status: 403 });
   }
-  // Only the reviewer (the one it was proposed FOR) or project owner can drop it.
+  // Three parties may drop it: the reviewer it was proposed FOR, the owner, and
+  // the author who proposed it. Without the author, an agent that spotted its
+  // own mistake had no way to withdraw the proposal — `reject-edit` is the only
+  // route that removes one, and it answered 403. A proposal its author cannot
+  // retract is worse than no proposal: the reviewer keeps being asked to decide
+  // on something already known to be wrong.
   const isReviewer = existing.userId === ctx.actor.id;
   const isOwner = ctx.role === "owner";
-  if (!isReviewer && !isOwner) {
+  const isAuthor = existing.authorId === ctx.actor.id;
+  if (!isReviewer && !isOwner && !isAuthor) {
     return Response.json({ error: "not yours to drop" }, { status: 403 });
   }
 

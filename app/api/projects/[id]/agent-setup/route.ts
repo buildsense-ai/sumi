@@ -18,6 +18,7 @@
 import { getDb } from "@/src/db";
 import { getProject } from "@/src/auth/identity";
 import { actorForProject } from "@/lib/http-auth";
+import { apiPath } from "@/lib/api-path";
 
 export async function GET(
   request: Request,
@@ -59,20 +60,50 @@ export async function GET(
   const fileId =
     url.searchParams.get("fileId") || "notes/intro.md";
 
-  // Best-guess WS URL — clients should override via env. Reads the same
-  // NEXT_PUBLIC_WS_URL the browser editor resolves in lib/utils.ts, so the
-  // onboarding string and the UI never point at different endpoints.
+  // Addresses handed to an agent that may not be running on this host.
+  //
+  // These defaulted to `http://localhost:3000` and `ws://localhost:12345`, which
+  // is wrong twice over behind the artifact gateway: the app is served at
+  // /<app-id>/ on a public origin, and the WS server listens on its own port
+  // (1234 here, not the upstream default 12345). An agent following the guide
+  // verbatim therefore could not connect at all.
+  //
+  // Note the variable names: `NEXT_PUBLIC_*` are inlined at build time, so
+  // exporting one in the service environment after the build does nothing — the
+  // deployment built without it, and the guide kept advertising localhost. The
+  // `SUMI_PUBLIC_*` names below are plain runtime variables, read per request, so
+  // they can be set (and corrected) without a rebuild. The public ones remain as
+  // a fallback for upstream deployments that already set them.
+  const publicOrigin = (
+    process.env.SUMI_PUBLIC_ORIGIN ||
+    process.env.NEXT_PUBLIC_SUMI_URL ||
+    new URL(request.url).origin
+  ).replace(/\/+$/, "");
+
   const wsBaseUrl =
+    process.env.SUMI_PUBLIC_WS_URL ||
     process.env.NEXT_PUBLIC_WS_URL ||
     `ws://localhost:${process.env.WS_PORT || 12345}`;
-  const httpBaseUrl =
-    process.env.NEXT_PUBLIC_SUMI_HTTP_URL || "http://localhost:3000";
+
+  // Origin + the deployment's own base path. Keeping them separate is what stops
+  // the guide from dropping /<app-id>/ — the prefix the gateway strips.
+  //
+  // The trailing slash is stripped because these values are pasted straight into
+  // `SUMI_BASE_URL=…` and then joined with paths that begin with "/": leaving it
+  // on produced "…/sumi//api/page-state/…" in the guide and a base URL whose
+  // concatenation depends on the client normalizing double slashes.
+  const appBaseUrl = `${publicOrigin}${apiPath("")}`.replace(/\/+$/, "");
+
+  // The app's own page-state route, not the WS admin surface. The WS endpoint is
+  // only reachable when that port is routed, which behind the gateway it is not;
+  // the app route proxies to it and keeps the /<app-id>/ prefix.
+  const pageStateUrl = `${appBaseUrl}/api/page-state/${projectId}`;
 
   const roomName = `${projectId}-${fileId}`;
   const wsUrl = `${wsBaseUrl}/${roomName}?api_key=cc_...`;
 
   const envBlock = [
-    `SUMI_BASE_URL=${httpBaseUrl}`,
+    `SUMI_BASE_URL=${appBaseUrl}`,
     `SUMI_WS_URL=${wsBaseUrl}`,
     `SUMI_API_KEY=cc_...    # CatsCo ApiKey（换成 agent 自己的）`,
   ].join("\n");
@@ -96,7 +127,7 @@ export async function GET(
     `如果你的宿主已装了 sumi-kit（Pi/Claude/Codex 等都可以用 install.py 一键装），直接用 CLI：`,
     ``,
     `\`\`\`bash`,
-    `export SUMI_BASE_URL="${httpBaseUrl}"`,
+    `export SUMI_BASE_URL="${appBaseUrl}"`,
     `export SUMI_API_KEY="cc_..."   # 你的 CatsCo ApiKey`,
     ``,
     `sumi whoami                          # 验证连接`,
@@ -114,7 +145,7 @@ export async function GET(
     ``,
     `\`\`\`bash`,
     `export SUMI_WS_URL="${wsBaseUrl}"`,
-    `export SUMI_HTTP_URL="${httpBaseUrl}"`,
+    `export SUMI_HTTP_URL="${appBaseUrl}"`,
     `export CATSCO_API_KEY="cc_..."`,
     `\`\`\``,
     ``,
@@ -175,7 +206,7 @@ export async function GET(
     `对结构性改动（删大段、重写整节），**永远先走 pending-edit**，让人类点「保留/撤销」：`,
     ``,
     `\`\`\`bash`,
-    `curl -X POST "${httpBaseUrl}/api/pending-edits" \\`,
+    `curl -X POST "${appBaseUrl}/api/pending-edits" \\`,
     `  -H "Authorization: Bearer $CATSCO_API_KEY" \\`,
     `  -H "Content-Type: application/json" \\`,
     `  -d '{`,
@@ -208,7 +239,7 @@ export async function GET(
     `| 新建文档 | \`POST /api/projects/${projectId}/documents { fileId, title }\` |`,
     `| 上传图片 | \`POST /api/projects/${projectId}/assets\` (binary body, \`x-file-name\` header) |`,
     `| 文档元数据 | \`GET /api/documents/content?projectId&filePath\` → \`{ content, contentHash }\` |`,
-    `| 页面状态 | \`GET ${wsBaseUrl.replace("ws://", "http://").replace("wss://", "https://")}/page-state/${projectId}\` — 谁在看什么文档、哪个面板开着 |`,
+    `| 页面状态 | \`GET ${pageStateUrl}\` — 谁在看什么文档、哪个面板开着 |`,
     ``,
     `## 富文本回答 — json-render Spec`,
     ``,

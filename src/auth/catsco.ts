@@ -29,7 +29,17 @@ const CATSCO_BASE_URL = (
   process.env.CATSCO_BASE_URL || "http://localhost:8080"
 ).replace(/\/+$/, "");
 
-const CATSCO_SERVICE_TOKEN = process.env.CATSCO_SERVICE_TOKEN || "";
+/**
+ * Read at call time rather than at module evaluation.
+ *
+ * A module-level const captures whatever the environment held when the file was
+ * first imported, so a process that sets the token later — a test, or a runner
+ * that loads config after the import graph — silently keeps using the empty
+ * value and every ApiKey falls through to the fallback path.
+ */
+function serviceToken(): string {
+  return process.env.CATSCO_SERVICE_TOKEN || "";
+}
 
 const JWT_SECRET = process.env.OC_JWT_SECRET || "";
 
@@ -107,13 +117,39 @@ export interface IntrospectResult {
 }
 
 /**
- * Call CatsCo's introspection endpoint. The Service token is ours — clients
- * never see it. Returns null if CATSCO_SERVICE_TOKEN isn't configured.
+ * Verify a `cc_*` ApiKey against CatsCo.
+ *
+ * Two paths, tried in order:
+ *
+ *   1. `POST /api/account/introspect` — the canonical one. It authenticates with
+ *      a shared Service token, so it needs CATSCO_SERVICE_TOKEN configured.
+ *   2. `GET /api/me` with the caller's own key. CatsCo's auth middleware accepts
+ *      an ApiKey directly on that route (it parses the uid out of the key and
+ *      checks the bot row), so the key can be verified by the party that owns
+ *      it, with no shared secret on our side.
+ *
+ * The fallback exists because a gateway deployment deliberately holds no shared
+ * CatsCo secret — the browser is identified by the gateway viewer cookie. Without
+ * it, agents could never authenticate: their only credential is an ApiKey, and
+ * the introspect route would have no Service token to present.
+ *
+ * Both paths normalize to the same shape; note that `/api/me` reports
+ * account_type as a *string* ("human"/"bot") while introspection reports it as a
+ * number (0=human, 1=bot), so the string form is mapped before returning.
  */
 export async function introspectToken(
   token: string
 ): Promise<IntrospectResult | null> {
-  if (!CATSCO_SERVICE_TOKEN) return null;
+  if (serviceToken()) {
+    const viaIntrospect = await introspectWithServiceToken(token);
+    if (viaIntrospect) return viaIntrospect;
+  }
+  return verifyApiKeyViaMe(token);
+}
+
+async function introspectWithServiceToken(
+  token: string
+): Promise<IntrospectResult | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), INTROSPECT_TIMEOUT_MS);
   try {
@@ -121,13 +157,80 @@ export async function introspectToken(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Service ${CATSCO_SERVICE_TOKEN}`,
+        Authorization: `Service ${serviceToken()}`,
       },
       body: JSON.stringify({ token }),
       signal: controller.signal,
     });
     if (!res.ok) return null;
     return (await res.json()) as IntrospectResult;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** account_type as a number; /api/me says "bot" where introspect says 1. */
+function normalizeAccountType(raw: unknown): number {
+  if (typeof raw === "number") return raw;
+  switch (String(raw ?? "").toLowerCase()) {
+    case "bot":
+      return 1;
+    case "agent":
+      return 2;
+    // "" and "human" and anything unrecognized are treated as human: guessing
+    // "agent" for an unknown value would hand an unreviewed principal write
+    // access to every project that admits agents.
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Verify an ApiKey by asking CatsCo who it belongs to, using that same key.
+ * Returns null for a rejected or unusable answer; callers treat null as
+ * "not authenticated".
+ */
+async function verifyApiKeyViaMe(
+  token: string
+): Promise<IntrospectResult | null> {
+  if (!token.startsWith("cc_")) return null;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), INTROSPECT_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${CATSCO_BASE_URL}/api/me`, {
+      headers: { Authorization: `ApiKey ${token}` },
+      cache: "no-store",
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+
+    const me = (await res.json()) as {
+      uid?: number;
+      username?: string;
+      email?: string;
+      display_name?: string;
+      avatar_url?: string;
+      account_type?: unknown;
+    };
+
+    const uid = Number(me?.uid);
+    if (!Number.isFinite(uid) || uid <= 0) return null;
+
+    return {
+      active: true,
+      user: {
+        uid,
+        username: me.username || "",
+        email: me.email,
+        display_name: me.display_name,
+        avatar_url: me.avatar_url,
+        account_type: normalizeAccountType(me.account_type),
+        state: 0,
+      },
+    };
   } catch {
     return null;
   } finally {
