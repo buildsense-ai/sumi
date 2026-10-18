@@ -221,3 +221,26 @@
 .cm-ySelectionCaret.cm-ySelectionCaretActive > .cm-ySelectionInfo {
   opacity: 1;
 }
+
+/*
+ * Accent + density, patch-drivable.
+ *
+ * The shell carries these as data attributes, so switching the accent or tightening
+ * the spacing is a value change rather than a rebuild. Every primitive above reads
+ * from these tokens, which is what makes "change the look" reachable at all: styling
+ * written with literal colours would ignore it.
+ */
+[data-accent="violet"] { --primary: 262 60% 58%; }
+[data-accent="emerald"] { --primary: 158 55% 40%; }
+[data-accent="amber"] { --primary: 32 80% 48%; }
+[data-accent="rose"] { --primary: 344 65% 55%; }
+[data-accent="slate"] { --primary: 215 18% 42%; }
+
+[data-density="compact"] {
+  --radius: 6px;
+  --density-gap: 0.25rem;
+}
+[data-density="comfortable"] {
+  --radius: 10px;
+  --density-gap: 0.5rem;
+}

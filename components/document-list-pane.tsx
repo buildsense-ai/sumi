@@ -11,6 +11,7 @@ import { useRouter } from "next/navigation";
 import { getAuthHeaders } from "@/lib/use-session";
 import { toast } from "@/components/ui/toast";
 import { cn } from "@/lib/utils";
+import { useUiStore } from "@/stores/ui-store";
 import ProjectTable from "@/components/project-table";
 import FileTree from "@/components/file-tree";
 import { renameFolderPrefix } from "@/lib/file-tree";
@@ -109,7 +110,11 @@ export default function DocumentListPane() {
   const [addMemberMode, setAddMemberMode] = useState<"picker" | "manual">("picker");
   const [busyActions, setBusyActions] = useState<Set<string>>(new Set());
   // list | table — persisted across sessions
-  const [viewMode, setViewMode] = useState<"list" | "table">("list");
+  // From the store, so a `set_project_view` patch can switch it and the saved
+  // preference travels the same path. See the note in workspace-shell about
+  // chrome that lives in local state.
+  const viewMode = useUiStore((s) => s.projectView);
+  const setViewMode = useUiStore((s) => s.setProjectView);
   const [renamingProject, setRenamingProject] = useState(false);
   const [projectRenameValue, setProjectRenameValue] = useState("");
 

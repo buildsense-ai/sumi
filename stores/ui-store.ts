@@ -47,6 +47,50 @@ interface UiStoreState {
   promptCommand: PromptCommand | null;
   pendingPromptCommands: PromptCommand[];
   focusRangeCommand: FocusRangeCommand | null;
+  /**
+   * Which sidebar tab is showing.
+   *
+   * Lives here rather than in the shell's local state so a patch can select it:
+   * a tab the assistant cannot reach is a tab the assistant cannot show you.
+   */
+  sidebarTab: "outline" | "members" | "history";
+  /** Project list presentation — the list / table toggle. */
+  projectView: "list" | "table";
+  /**
+   * Accent and density.
+   *
+   * Applied to the shell as data attributes rather than baked into a build: the
+   * primitives read their colours and radii from CSS tokens, so a patch can restyle
+   * the workspace without a redeploy.
+   */
+  theme: {
+    accent: "cyan" | "violet" | "emerald" | "amber" | "rose" | "slate";
+    density: "compact" | "comfortable";
+  };
+  /**
+   * Workspace skeleton — where panels sit, as opposed to whether they exist
+   * (`panelVisibility`) or how wide they are (`panelWidth`).
+   */
+  layout: {
+    /** Which edge the editor sidebar docks to. */
+    sidebarSide: "left" | "right";
+    /**
+     * Share of the split view given to the editor, 0.2–0.8.
+     *
+     * Only meaningful in the split view. Bounded because a pane narrower than a
+     * fifth is not usable, and an unbounded ratio would let a stray value hide one
+     * of the two panes entirely — which reads as "the preview broke".
+     */
+    splitRatio: number;
+  };
+  /**
+   * One-shot request to change the editor's view mode.
+   *
+   * The toggle is local component state today, so a patch cannot reach it by
+   * setting a shared field; it asks instead, and the shell applies the request
+   * and acknowledges it — same handshake as `focusRangeCommand`.
+   */
+  editorViewCommand: { id: string; view: "source" | "split" | "preview" } | null;
   /** Bumped when a doc version is restored — keys off `${projectId}-${fileId}`. */
   lastRestore: { documentId: string; fileId: string; versionId: string; token: number } | null;
 
@@ -55,10 +99,15 @@ interface UiStoreState {
   setActiveMainBlock: (block: WorkspaceMainBlock) => void;
   setPanelVisibility: (panel: PanelName, visible: boolean) => void;
   setPanelWidth: (panel: PanelName, widthPercent: number) => void;
+  setSidebarTab: (tab: "outline" | "members" | "history") => void;
+  setProjectView: (view: "list" | "table") => void;
+  setTheme: (next: Partial<UiStoreState["theme"]>) => void;
+  setLayout: (next: Partial<UiStoreState["layout"]>) => void;
   triggerAttention: (target: AttentionTarget, reason?: AttentionSignal["reason"]) => void;
   consumeAttention: () => void;
   consumePromptCommand: () => void;
   consumeFocusRange: () => void;
+  consumeEditorView: () => void;
   applyUiPatch: (patch: UiPatch) => void;
 }
 
@@ -78,6 +127,11 @@ export const useUiStore = create<UiStoreState>((set, get) => ({
   promptCommand: null,
   pendingPromptCommands: [],
   focusRangeCommand: null,
+  sidebarTab: "outline",
+  projectView: "list",
+  theme: { accent: "cyan", density: "comfortable" },
+  layout: { sidebarSide: "right", splitRatio: 0.5 },
+  editorViewCommand: null,
   lastRestore: null,
 
   setCurrentDocumentId: (id) =>
@@ -135,10 +189,18 @@ export const useUiStore = create<UiStoreState>((set, get) => ({
       },
     })),
 
+  setSidebarTab: (tab) => set({ sidebarTab: tab }),
+  setProjectView: (view) => set({ projectView: view }),
+  setTheme: (next) =>
+    set((state) => ({ theme: { ...state.theme, ...next } })),
+  setLayout: (next) =>
+    set((state) => ({ layout: { ...state.layout, ...next } })),
+
   triggerAttention: (target, reason) =>
     set({ attentionSignal: signal(target, reason) }),
   consumeAttention: () => set({ attentionSignal: null }),
   consumeFocusRange: () => set({ focusRangeCommand: null }),
+  consumeEditorView: () => set({ editorViewCommand: null }),
 
   consumePromptCommand: () =>
     set((state) => {
@@ -238,6 +300,62 @@ export const useUiStore = create<UiStoreState>((set, get) => ({
             endLine: patch.endLine,
           },
           attentionSignal: signal("editor", "navigation"),
+        }));
+        return;
+
+      case "set_editor_view":
+        // A fresh id each time, so asking for the same mode twice still reaches
+        // the shell as a new request rather than a no-op state change.
+        set({
+          editorViewCommand: {
+            id: `view-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            view: patch.view,
+          },
+        });
+        return;
+
+      case "set_sidebar_tab":
+        // Default to opening the sidebar: selecting a tab nobody can see would be
+        // a no-op from the user's side, which is the confusing half of a command
+        // that half-worked.
+        set((state) => ({
+          sidebarTab: patch.tab,
+          panelVisibility: {
+            ...state.panelVisibility,
+            sidebar: patch.visible ?? true,
+          },
+          attentionSignal: signal("sidebar"),
+        }));
+        return;
+
+      case "set_project_view":
+        set({ projectView: patch.view });
+        return;
+
+      case "set_layout":
+        // Merged like the theme: naming only the sidebar side must not reset the
+        // split ratio, or a "move the panel" call would silently re-proportion the
+        // editor. Clamped here as well as in the validator, because the store is
+        // also reached by the drag handler.
+        set((state) => ({
+          layout: {
+            sidebarSide: patch.sidebarSide ?? state.layout.sidebarSide,
+            splitRatio:
+              typeof patch.splitRatio === "number"
+                ? Math.min(0.8, Math.max(0.2, patch.splitRatio))
+                : state.layout.splitRatio,
+          },
+        }));
+        return;
+
+      case "set_theme":
+        // Merged, not replaced: a patch that only changes the accent must leave the
+        // density alone, or every theme call would silently reset the other axis.
+        set((state) => ({
+          theme: {
+            accent: patch.accent ?? state.theme.accent,
+            density: patch.density ?? state.theme.density,
+          },
         }));
         return;
 

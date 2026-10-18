@@ -42,6 +42,53 @@ export type UiPatch =
   | { type: "queue_prompt"; prompt: string; autoSend?: boolean }
   | { type: "focus_document_range"; documentId: string; startLine: number; endLine: number }
   | {
+      /** Which sidebar tab is showing (outline / members / history). */
+      type: "set_sidebar_tab";
+      tab: "outline" | "members" | "history";
+      /** Open the sidebar too; defaults to true so the tab is actually visible. */
+      visible?: boolean;
+    }
+  | {
+      /** Project list presentation — the list / table toggle. */
+      type: "set_project_view";
+      view: "list" | "table";
+    }
+  | {
+      /**
+       * Workspace skeleton.
+       *
+       * Distinct from `set_panel_visibility` (whether a panel exists) and
+       * `set_panel_size` (how big it is): this is *where* it sits. Moving the
+       * sidebar to the left is a different arrangement, not a different width.
+       */
+      type: "set_layout";
+      sidebarSide?: "left" | "right";
+      /** Share of the split view for the editor, 0.2–0.8. */
+      splitRatio?: number;
+    }
+  | {
+      /**
+       * Accent colour and spacing density.
+       *
+       * Part of the reachable surface on purpose: every primitive reads these from
+       * CSS tokens, so changing the look is a value change. Anything that styled
+       * itself with literal colours would ignore this.
+       */
+      type: "set_theme";
+      accent?: "cyan" | "violet" | "emerald" | "amber" | "rose" | "slate";
+      density?: "compact" | "comfortable";
+    }
+  | {
+      /**
+       * Editor view mode for the open document.
+       *
+       * Distinct from `set_main_block: "preview"`: that swaps the workspace pane,
+       * this is the source / split / preview toggle inside the editor.
+       */
+      type: "set_editor_view";
+      view: "source" | "split" | "preview";
+    }
+  | {
       /** A pending edit proposal was added/removed for a doc in this project.
        *  Consumers hydrate `useEditStore.pendingEdits` from the payload. */
       type: "pending_edit_changed";

@@ -24,12 +24,13 @@ import { EditorToolbar } from "@/components/editor/editor-toolbar";
 import OutlineSidebar from "@/components/editor/outline-sidebar";
 import VersionHistory from "@/components/editor/version-history";
 import { AskAgentDialog } from "@/components/ask-agent-dialog";
-import { AiChatPanel } from "@/components/ai-chat-panel";
+import { AgentAskDock } from "@/components/agent-ask-dock";
 import EditCommandBar from "@/components/editor/edit-command-bar";
 import { useEditStore } from "@/stores/edit-store";
 import DocumentListPane from "@/components/document-list-pane";
 import MarkdownPreview from "@/components/markdown-preview";
 import { Toaster } from "@/components/ui/toast";
+import { Button, Tabs } from "@/components/ui/primitives";
 import { useIntentStore } from "@/stores/intent-store";
 import { SettingsDialog, useEditorSettings } from "@/components/settings-dialog";
 import { useDocPersistence } from "@/lib/use-doc-persistence";
@@ -45,6 +46,9 @@ export default function WorkspaceShell() {
   const consumeAttention = useUiStore((s) => s.consumeAttention);
   const panelVisibility = useUiStore((s) => s.panelVisibility);
   const panelWidth = useUiStore((s) => s.panelWidth);
+  // Accent + density, applied as data attributes on the shell root so every
+  // primitive picks them up from the same CSS tokens.
+  const theme = useUiStore((s) => s.theme);
   const setCurrentDocumentId = useUiStore((s) => s.setCurrentDocumentId);
   const setPanelVisibility = useUiStore((s) => s.setPanelVisibility);
 
@@ -134,15 +138,17 @@ export default function WorkspaceShell() {
     : [null, null];
 
   return (
-    <div className="relative h-screen w-full overflow-hidden bg-background text-foreground">
-      {/* Canvas layer — main content (shrinks right when the AI panel opens) */}
-      <div
-        className={cn(
-          "absolute inset-0 transition-all duration-200 ease-out-quint",
-          aiOpen && "canvas-retreat",
-          aiOpen && "right-[360px]"
-        )}
-      >
+    <div
+      className="relative h-screen w-full overflow-hidden bg-background text-foreground"
+      // Accent and density are read by every primitive through CSS tokens, so a
+      // `set_theme` patch restyles the workspace without a rebuild.
+      data-accent={theme.accent}
+      data-density={theme.density}
+    >
+      {/* Canvas layer — main content.
+          The ask dock floats over this rather than docking beside it: it is an
+          interruption, not a workspace, so the document keeps its full width. */}
+      <div className="absolute inset-0">
         {loading ? (
           <LoadingPane />
         ) : !actor ? (
@@ -158,23 +164,14 @@ export default function WorkspaceShell() {
         )}
       </div>
 
-      {/* Dim layer — subtle veil when AI dock is engaged */}
-      <div
-        aria-hidden
-        className={cn(
-          "pointer-events-none absolute inset-0 bg-black/[0.03] transition-opacity duration-200",
-          aiOpen ? "opacity-100" : "opacity-0"
-        )}
-      />
-
-      {/* AI chat panel — right slide-over with intent threads + composer */}
+      {/* Ask dock — floating button, expanding to an input box. No thread list:
+          the answer to the newest ask is the only thing it shows. */}
       {actor && (
-        <AiChatPanel
+        <AgentAskDock
           open={aiOpen}
-          onClose={() => setPanelVisibility("ai", false)}
+          onOpenChange={(next) => setPanelVisibility("ai", next)}
           projectId={aiProjectId}
           fileId={aiFileId}
-          actorId={actor.id}
         />
       )}
 
@@ -210,11 +207,36 @@ function EditorPane({
   const [collaborators, setCollaborators] = useState<Array<{ name: string; color: string; id?: string }>>([]);
   const [connStatus, setConnStatus] = useState({ isConnected: false, isSynced: false });
   const [viewMode, setViewMode] = useState<EditorViewMode>("source");
+  const editorViewCommand = useUiStore((s) => s.editorViewCommand);
+  const consumeEditorView = useUiStore((s) => s.consumeEditorView);
+
+  // The toggle is local component state, which a store update cannot reach, so the
+  // store carries a one-shot request instead: apply it here, then acknowledge by
+  // clearing it. Without the acknowledgement the request would be re-applied on
+  // every render and the user could never switch away from the requested mode.
+  useEffect(() => {
+    if (!editorViewCommand) return;
+    setViewMode(editorViewCommand.view);
+    consumeEditorView();
+  }, [editorViewCommand, consumeEditorView]);
   const [tapEnabled, setTapEnabled] = useState(false);
   const [currentContent, setCurrentContent] = useState("");
   const [cursorLine, setCursorLine] = useState<number | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [sidebarTab, setSidebarTab] = useState<"outline" | "members" | "history">("outline");
+  // The sidebar's visibility lives in the ui-store, not in local state.
+  //
+  // It used to be a local `useState`, which meant two things disagreed: page state
+  // broadcast `panelVisibility.sidebar` (so every other client and agent was told a
+  // constant), and a `set_panel_visibility` patch moved the store — which nothing
+  // rendered from — while the sidebar the user could see stayed put. That is the
+  // same shape as the view-mode toggle: state a patch cannot reach reads as "the
+  // assistant's UI commands don't work".
+  const sidebarOpen = useUiStore((s) => s.panelVisibility.sidebar);
+  const setPanelVisibility = useUiStore((s) => s.setPanelVisibility);
+  // Tab selection lives in the store, for the same reason the visibility does:
+  // it is chrome the assistant should be able to drive, and state a patch cannot
+  // reach is state the assistant appears unable to touch.
+  const sidebarTab = useUiStore((s) => s.sidebarTab);
+  const setSidebarTab = useUiStore((s) => s.setSidebarTab);
   const [askOpen, setAskOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings] = useEditorSettings();
@@ -258,27 +280,33 @@ function EditorPane({
     scheduleSave(content);
   };
 
-  // Right sidebar (大纲/成员) — persisted per project
+  // Right sidebar (大纲/成员) — persisted per project.
+  //
+  // The stored preference is applied *into the store*, so a restored session and a
+  // patched one travel the same path. No stored value means closed, which is what
+  // the local state used to default to.
   useEffect(() => {
     try {
       const v = localStorage.getItem(`sumi:sidebar:${projectId}`);
       if (v === "outline" || v === "members" || v === "history") {
-        setSidebarOpen(true);
+        setPanelVisibility("sidebar", true);
         setSidebarTab(v);
       } else if (v === "closed") {
-        setSidebarOpen(false);
+        setPanelVisibility("sidebar", false);
+      } else {
+        setPanelVisibility("sidebar", false);
       }
     } catch {
       /* private mode */
     }
-  }, [projectId]);
+  }, [projectId, setPanelVisibility]);
 
   const toggleSidebar = (tab?: "outline" | "members" | "history") => {
     const next = tab
       ? !(sidebarOpen && sidebarTab === tab)
       : !sidebarOpen;
     const nextTab = tab ?? sidebarTab;
-    setSidebarOpen(next);
+    setPanelVisibility("sidebar", next);
     if (tab) setSidebarTab(tab);
     try {
       localStorage.setItem(
@@ -484,6 +512,80 @@ function EditorPane({
     return () => store.setNavigateToFileCallback(null);
   }, [projectId, fileId, router]);
 
+  // The sidebar is built once and placed on whichever edge the layout names.
+  // Placing it by rendering it in one of two positions would duplicate this prop
+  // list, and the copies would drift.
+  const sidebarSide = useUiStore((s) => s.layout.sidebarSide);
+  const splitRatio = useUiStore((s) => s.layout.splitRatio);
+  const setLayout = useUiStore((s) => s.setLayout);
+  const splitRowRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * Drag the divider between editor and preview.
+   *
+   * The ratio is measured against the space the two panes actually share, not the
+   * container: with the sidebar docked, the container is wider, and dividing by it
+   * would make the same drag move the divider less on one side than the other.
+   *
+   * Listener cleanup is on `window` rather than the handle because a fast drag
+   * leaves the handle behind, and a pointerup delivered elsewhere would otherwise
+   * leave the handler attached forever.
+   */
+  const startSplitDrag = (event: React.MouseEvent) => {
+    const row = splitRowRef.current;
+    if (!row) return;
+    event.preventDefault();
+
+    const aside = row.querySelector("aside");
+    const rowWidth = row.getBoundingClientRect().width;
+    const shared = rowWidth - (aside ? aside.getBoundingClientRect().width : 0);
+    if (shared <= 0) return;
+
+    const startX = event.clientX;
+    const startRatio = splitRatio;
+
+    const move = (e: MouseEvent) => {
+      setLayout({ splitRatio: startRatio + (e.clientX - startX) / shared });
+    };
+    const stop = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", stop);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", stop);
+  };
+  const sidePanel = sidebarOpen ? (
+    <SidePanel
+      tab={sidebarTab}
+      setTab={setSidebarTab}
+      onClose={() => toggleSidebar()}
+      side={sidebarSide}
+      view={editorViewRef.current}
+      content={currentContent || initialContent || ""}
+      cursorLine={cursorLine}
+      collaborators={collaborators}
+      members={members}
+      memberPresence={memberPresence}
+      contacts={contacts}
+      contactsLoading={contactsLoading}
+      addMemberMode={addMemberMode}
+      setAddMemberMode={setAddMemberMode}
+      newMemberId={newMemberId}
+      setNewMemberId={setNewMemberId}
+      newMemberRole={newMemberRole}
+      setNewMemberRole={setNewMemberRole}
+      onAddMember={addMember}
+      onAddMemberManual={addMemberManual}
+      projectId={projectId}
+      fileId={fileId}
+    />
+  ) : null;
+
   return (
     <div
       className={cn(
@@ -639,8 +741,12 @@ function EditorPane({
             className="h-full overflow-auto"
           />
         ) : viewMode === "split" ? (
-          <div className="flex h-full">
-            <div className="flex-1 overflow-hidden border-r border-border/60">
+          <div className="flex h-full" ref={splitRowRef}>
+            {sidebarSide === "left" && sidePanel}
+            <div
+              className="min-w-0 overflow-hidden"
+              style={{ flex: `0 0 ${splitRatio * 100}%` }}
+            >
               <CollaborativeEditor
                 projectId={projectId}
                 fileId={fileId}
@@ -658,37 +764,23 @@ function EditorPane({
                 onConnectionStatusChange={setConnStatus}
               />
             </div>
-            <div className="flex-1 overflow-auto bg-background">
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="拖动调整编辑与预览的宽度"
+              onMouseDown={startSplitDrag}
+              onDoubleClick={() => setLayout({ splitRatio: 0.5 })}
+              title="拖动调整分栏 · 双击回到各半"
+              className="w-1 shrink-0 cursor-col-resize bg-border/50 transition-colors hover:bg-primary/40"
+            />
+            <div className="min-w-0 flex-1 overflow-auto bg-background">
               <MarkdownPreview content={currentContent || initialContent || ""} />
             </div>
-            {sidebarOpen && (
-              <SidePanel
-                tab={sidebarTab}
-                setTab={setSidebarTab}
-                onClose={() => toggleSidebar()}
-                view={editorViewRef.current}
-                content={currentContent || initialContent || ""}
-                cursorLine={cursorLine}
-                collaborators={collaborators}
-                members={members}
-                memberPresence={memberPresence}
-                contacts={contacts}
-                contactsLoading={contactsLoading}
-                addMemberMode={addMemberMode}
-                setAddMemberMode={setAddMemberMode}
-                newMemberId={newMemberId}
-                setNewMemberId={setNewMemberId}
-                newMemberRole={newMemberRole}
-                setNewMemberRole={setNewMemberRole}
-                onAddMember={addMember}
-                onAddMemberManual={addMemberManual}
-                projectId={projectId}
-                fileId={fileId}
-              />
-            )}
+            {sidebarSide === "right" && sidePanel}
           </div>
         ) : (
           <div className="flex h-full">
+            {sidebarSide === "left" && sidePanel}
             <div className="min-w-0 flex-1 overflow-hidden">
               <CollaborativeEditor
                 projectId={projectId}
@@ -707,31 +799,7 @@ function EditorPane({
                 onConnectionStatusChange={setConnStatus}
               />
             </div>
-            {sidebarOpen && (
-              <SidePanel
-                tab={sidebarTab}
-                setTab={setSidebarTab}
-                onClose={() => toggleSidebar()}
-                view={editorViewRef.current}
-                content={currentContent || initialContent || ""}
-                cursorLine={cursorLine}
-                collaborators={collaborators}
-                members={members}
-                memberPresence={memberPresence}
-                contacts={contacts}
-                contactsLoading={contactsLoading}
-                addMemberMode={addMemberMode}
-                setAddMemberMode={setAddMemberMode}
-                newMemberId={newMemberId}
-                setNewMemberId={setNewMemberId}
-                newMemberRole={newMemberRole}
-                setNewMemberRole={setNewMemberRole}
-                onAddMember={addMember}
-                onAddMemberManual={addMemberManual}
-                projectId={projectId}
-                fileId={fileId}
-              />
-            )}
+            {sidebarSide === "right" && sidePanel}
           </div>
         )}
       </div>
@@ -812,8 +880,11 @@ function SidePanel({
   onAddMemberManual,
   projectId,
   fileId,
+  side = "right",
 }: {
   tab: "outline" | "members" | "history";
+  /** Which edge the panel is docked to — decides the divider's side. */
+  side?: "left" | "right";
   setTab: (t: "outline" | "members" | "history") => void;
   onClose: () => void;
   view: EditorView | null;
@@ -835,32 +906,39 @@ function SidePanel({
   projectId: string;
   fileId: string;
 }) {
+  // The panel width is patch-drivable, so it has to be rendered from the store.
+  // It previously lived only in the store (written by `set_panel_size`, read once
+  // and dropped), while the element below was a fixed `w-60` — the patch reported
+  // success and nothing on screen moved.
+  //
+  // No max-width: a cap silently swallowed the upper half of the range, so asking
+  // for 60% and asking for 90% looked identical. The store already clamps to the
+  // documented 10–90, and a narrow min-width is what keeps the panel usable.
+  const sidebarWidth = useUiStore((s) => s.panelWidth.sidebar);
+
   return (
-    <aside className="flex w-60 shrink-0 flex-col border-l border-border/60 bg-background">
+    <aside
+      className={cn(
+        "flex min-w-[200px] shrink-0 flex-col bg-background",
+        // The divider belongs on the edge facing the editor. A left-docked panel
+        // with a left border would draw a line against the window instead.
+        side === "left" ? "border-r border-border/60" : "border-l border-border/60"
+      )}
+      style={{ width: `${sidebarWidth}%` }}
+    >
       <div className="flex h-9 shrink-0 items-center justify-between border-b border-border/60 px-3">
-        <div className="flex items-center gap-0.5 rounded-md border border-border/60 p-0.5">
-          {(["outline", "members", "history"] as const).map((t) => (
-            <button
-              key={t}
-              onClick={() => setTab(t)}
-              className={cn(
-                "rounded px-2 py-0.5 text-[10px] font-medium transition-colors",
-                tab === t
-                  ? "bg-accent text-foreground"
-                  : "text-muted-foreground hover:text-foreground"
-              )}
-            >
-              {t === "outline" ? "大纲" : t === "members" ? "成员" : "历史"}
-            </button>
-          ))}
-        </div>
-        <button
-          onClick={onClose}
-          className="text-[11px] text-muted-foreground/70 hover:text-foreground"
-          title="关闭"
-        >
+        <Tabs
+          value={tab}
+          onValueChange={setTab}
+          items={[
+            { value: "outline" as const, label: "大纲" },
+            { value: "members" as const, label: "成员" },
+            { value: "history" as const, label: "历史" },
+          ]}
+        />
+        <Button variant="ghost" size="icon" onClick={onClose} title="关闭">
           ✕
-        </button>
+        </Button>
       </div>
       {tab === "outline" ? (
         <OutlineSidebar

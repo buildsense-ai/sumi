@@ -21,6 +21,17 @@ import { useUiStore } from "@/stores/ui-store";
 
 const SAVE_ENDPOINT = apiPath("/api/documents/content");
 
+/**
+ * Give up waiting for the blob and let the editor render anyway.
+ *
+ * The canonical-content read is an optimisation, not a prerequisite: the document
+ * itself arrives over Yjs, and in preview mode the editor falls back to the live
+ * text it already has. Without a bound, a read that never settles leaves the whole
+ * pane on the loading placeholder forever, and the only symptom anyone sees is a
+ * spinner — which is indistinguishable from the app being broken.
+ */
+const LOAD_TIMEOUT_MS = 10_000;
+
 export interface PersistenceState {
   /** Loaded once from canonical storage — pass to `initialContent`. */
   initialContent: string | null;
@@ -83,7 +94,7 @@ export function useDocPersistence(
     [projectId, fileId]
   );
 
-  // Load canonical content + hash once
+  // Load canonical content + hash once, with a bound (see LOAD_TIMEOUT_MS).
   useEffect(() => {
     if (!projectId || !fileId) {
       setInitialContent("");
@@ -91,18 +102,26 @@ export function useDocPersistence(
       return;
     }
     setLoading(true);
+
+    let settled = false;
+    const finish = (content: string, hash: string | null) => {
+      if (settled) return;
+      settled = true;
+      setInitialContent(content);
+      contentHash.current = hash;
+      setLoading(false);
+    };
+
+    const timer = setTimeout(() => finish("", contentHash.current), LOAD_TIMEOUT_MS);
     const url = `${SAVE_ENDPOINT}?projectId=${encodeURIComponent(projectId)}&filePath=${encodeURIComponent(fileId)}`;
+
     fetch(url, { headers: getAuthHeaders() })
       .then((r) => (r.ok ? r.json() : { content: "", exists: false }))
-      .then((d) => {
-        setInitialContent(d.exists ? d.content : "");
-        contentHash.current = d.contentHash ?? null;
-        setLoading(false);
-      })
-      .catch(() => {
-        setInitialContent("");
-        setLoading(false);
-      });
+      .then((d) => finish(d.exists ? d.content : "", d.contentHash ?? null))
+      .catch(() => finish("", null))
+      .finally(() => clearTimeout(timer));
+
+    return () => clearTimeout(timer);
   }, [projectId, fileId]);
 
   const flush = useCallback(async () => {

@@ -30,10 +30,35 @@ const uiPatchSchema = z.union([
     autoSend: z.boolean().optional(),
   }),
   z.object({
+    type: z.literal("set_sidebar_tab"),
+    tab: z.enum(["outline", "members", "history"]),
+    visible: z.boolean().optional(),
+  }),
+  z.object({
+    type: z.literal("set_project_view"),
+    view: z.enum(["list", "table"]),
+  }),
+  z.object({
+    type: z.literal("set_layout"),
+    sidebarSide: z.enum(["left", "right"]).optional(),
+    // Clamped at the edges of the surface rather than trusted: a ratio outside this
+    // range hides one pane, which looks like a broken view rather than a setting.
+    splitRatio: z.number().min(0.2).max(0.8).optional(),
+  }),
+  z.object({
+    type: z.literal("set_theme"),
+    accent: z.enum(["cyan", "violet", "emerald", "amber", "rose", "slate"]).optional(),
+    density: z.enum(["compact", "comfortable"]).optional(),
+  }),
+  z.object({
     type: z.literal("focus_document_range"),
     documentId: z.string().min(1),
     startLine: z.number().int().min(1),
     endLine: z.number().int().min(1),
+  }),
+  z.object({
+    type: z.literal("set_editor_view"),
+    view: z.enum(["source", "split", "preview"]),
   }),
   z.object({
     type: z.literal("pending_edit_changed"),
