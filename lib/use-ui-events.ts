@@ -14,7 +14,7 @@ import { useUiStore } from "@/stores/ui-store";
 import { useEditStore } from "@/stores/edit-store";
 import { useIntentStore } from "@/stores/intent-store";
 import { validateUiPatch } from "@/src/a2ui/validate";
-import { getStoredToken } from "./use-session";
+import { getStoredToken, getAuthHeaders } from "./use-session";
 import { apiPath } from "./api-path";
 
 export interface UseUiEventsOptions {
@@ -85,17 +85,26 @@ export function useUiEvents({
               authorName?: string;
             };
             if (e0.id && e0.projectId) {
-              editStore.upsertPendingEdit({
-                id: e0.id,
-                projectId: e0.projectId,
-                filePath: (e0.filePath ?? e0.fileId ?? patch.fileId) as string,
-                blocks: (e0.blocks ?? []) as never,
-                description: e0.description,
-                status: "pending",
-                createdAt: e0.createdAt ?? Date.now(),
-                authorId: e0.authorId,
-                authorName: e0.authorName,
-              });
+              // Honour the payload's own status. This used to hardcode
+              // `status: "pending"`, so a replayed event for an edit that had
+              // already been applied or rejected put it straight back into the
+              // review queue — one of the ways the same suggestion kept coming
+              // back after being dealt with.
+              if (e0.status && e0.status !== "pending") {
+                editStore.removePendingEdit(e0.id);
+              } else {
+                editStore.upsertPendingEdit({
+                  id: e0.id,
+                  projectId: e0.projectId,
+                  filePath: (e0.filePath ?? e0.fileId ?? patch.fileId) as string,
+                  blocks: (e0.blocks ?? []) as never,
+                  description: e0.description,
+                  status: "pending",
+                  createdAt: e0.createdAt ?? Date.now(),
+                  authorId: e0.authorId,
+                  authorName: e0.authorName,
+                });
+              }
             }
           }
         }
@@ -120,10 +129,15 @@ async function refetchPendingEdits(projectId: string, fileId?: string): Promise<
   const url = new URL(apiPath("/api/pending-edits"), window.location.origin);
   url.searchParams.set("projectId", projectId);
   if (fileId) url.searchParams.set("fileId", fileId);
-  const token = getStoredToken();
-  if (!token) return;
+  // getAuthHeaders(), not a hand-rolled Authorization header.
+  //
+  // Behind the artifact gateway the browser holds no stored token at all, and the
+  // `if (!token) return` guard meant this refresh never ran there. That removed the
+  // only path that removed stale proposals, so a diff that had already been settled
+  // elsewhere stayed on screen indefinitely. The viewer cookie is sent
+  // automatically and is what actually authenticates in that deployment.
   const res = await fetch(url.toString(), {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: getAuthHeaders(),
   }).catch(() => null);
   if (!res?.ok) return;
   const { edits } = await res.json();

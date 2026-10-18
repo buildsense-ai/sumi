@@ -193,14 +193,19 @@ export default function CollaborativeEditor({
     ydocRef.current = ydoc;
     const ytext = ydoc.getText("content");
 
-    // Optional prefill so the editor doesn't flash blank before WS sync arrives.
-    if (prefillOnConnect && ytext.length === 0 && initialContentRef.current) {
-      ydoc.transact(() => {
-        if (ytext.length === 0) {
-          ytext.insert(0, initialContentRef.current!);
-        }
-      });
-    }
+    // No pre-sync prefill.
+    //
+    // This used to insert `initialContent` locally before joining the room, to
+    // avoid a blank flash. But the server also seeds a fresh room from the same
+    // content, and two independent inserts at the same position are concurrent
+    // operations — Yjs keeps both. Every connect therefore duplicated the document
+    // (5 chars in, 10 chars out; the real one grew to tens of megabytes), and the
+    // autosave wrote the doubled text back, so it doubled again on the next open.
+    //
+    // Seeding on the server makes the prefill unnecessary as well as harmful: the
+    // room already has the content, so sync delivers it and there is no blank
+    // flash to cover. The post-sync insert below still handles a genuinely empty
+    // room (a brand-new document), where there is nothing to collide with.
 
     const roomName = `${projectId}-${fileId}`;
     // Browser session token is stored in sessionStorage by the sign-in screen;
@@ -219,7 +224,10 @@ export default function CollaborativeEditor({
     // is unreachable, edits land in local storage and sync up on reconnect.
     let idbPersistence: IndexeddbPersistence | null = null;
     if (typeof window !== "undefined" && window.indexedDB) {
-      idbPersistence = new IndexeddbPersistence(`sumi-doc-${roomName}`, ydoc);
+      // Versioned key. The local mirror is merged into the doc on open, so a copy
+      // written while the doc was inflated would re-inflate it on the next visit —
+      // bumping the key abandons those copies instead of resurrecting them.
+      idbPersistence = new IndexeddbPersistence(`sumi-doc-v2-${roomName}`, ydoc);
     }
 
     const userColor = userId ? getUserColorById(userId) : generateUserColor();
