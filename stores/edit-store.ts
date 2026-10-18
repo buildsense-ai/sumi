@@ -346,12 +346,12 @@ export const useEditStore = create<EditStoreState>((set, get) => ({
       const cb = get().syncLocksCallback;
       if (cb) cb(get().getPendingLocks());
 
-      // Mark server-side row as applied so the pending queue stays clean.
-      fetch(apiPath("/api/pending-edits"), {
-        method: "DELETE",
-        headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
-        body: JSON.stringify({ editId }),
-      }).catch(() => undefined);
+      // No DELETE here. The apply route already records the row as `applied` and
+      // broadcasts that, whereas the delete route means "rejected" — calling it
+      // after a successful apply wrote the opposite of what happened, and those
+      // `rejected` rows are what replayed events then turned back into fresh
+      // proposals. The row's final state should describe the decision, so the
+      // apply path is left to own it.
 
       get().nextEdit();
       if (

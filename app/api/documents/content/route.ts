@@ -12,6 +12,7 @@ import { actorFromRequest } from "@/lib/http-auth";
 import { getDb } from "@/src/db";
 import { projectRoleFor } from "@/src/auth/actor";
 import { getStorage } from "@/src/storage";
+import { liveRoomContent } from "@/src/doc-content";
 import crypto from "crypto";
 
 const WS_PORT = process.env.WS_PORT ? parseInt(process.env.WS_PORT, 10) : 12345;
@@ -46,18 +47,34 @@ export async function GET(request: Request) {
 
   const storage = await getStorage();
   const key = docKey(projectId, filePath);
-  const exists = await storage.exists(key);
-  if (!exists) {
-    return Response.json({ content: "", exists: false, contentHash: null });
-  }
-  const buf = await storage.download(key);
+
+  // The live room wins while a client holds it open; the blob is only what a
+  // fresh room seeds from. Reading the blob alone returned content that was up to
+  // one autosave-debounce old after every edit, and stale indefinitely when no
+  // client stayed connected to flush it — which is what made applied edits look
+  // reverted to whoever read next.
+  const live = await liveRoomContent(projectId, filePath);
+
+  const blobExists = await storage.exists(key);
+  const buf = blobExists ? await storage.download(key) : null;
   // `stat`, not `list`: list walks a directory, so passing it a file made
   // readdir throw ENOTDIR and the load returned 500.
-  const info = await storage.stat(key);
+  const info = blobExists ? await storage.stat(key) : null;
+
+  if (live === null && !blobExists) {
+    return Response.json({ content: "", exists: false, contentHash: null });
+  }
+
   return Response.json({
-    content: buf.toString("utf8"),
+    content: live ?? buf!.toString("utf8"),
     exists: true,
-    contentHash: hashContent(buf),
+    // The hash describes the *blob*, because the blob is what a write replaces
+    // and therefore what the optimistic lock guards. Hashing the returned (live)
+    // content instead would make every save conflict for as long as the two
+    // differ, and the client would end up reporting an unresolvable conflict.
+    contentHash: buf ? hashContent(buf) : null,
+    /** Where the content came from — "room" while a client holds it open. */
+    source: live !== null ? "room" : "blob",
     updatedAt: info?.lastModified.toISOString(),
   });
 }

@@ -303,6 +303,8 @@ function EditorPane({
     Array<{ subjectId: string; displayName: string; username: string; kind: "user" | "agent" }>
   >([]);
   const [contactsLoading, setContactsLoading] = useState(false);
+  // Non-null when the roster could not be read — distinct from an empty roster.
+  const [contactsError, setContactsError] = useState<string | null>(null);
   const [addMemberMode, setAddMemberMode] = useState<"picker" | "manual">("picker");
   const [newMemberId, setNewMemberId] = useState("");
   const [newMemberRole, setNewMemberRole] = useState<"viewer" | "editor">("editor");
@@ -326,11 +328,21 @@ function EditorPane({
     if (sidebarTab !== "members" || !sidebarOpen) return;
     setContactsLoading(true);
     fetch(apiPath("/api/friends"), { headers: getAuthHeaders() })
-      .then((r) => (r.ok ? r.json() : { users: [], agents: [] }))
-      .then((d) => {
-        setContacts([...(d.users || []), ...(d.agents || [])]);
+      .then(async (r) => {
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          throw new Error(body?.detail || body?.error || `HTTP ${r.status}`);
+        }
+        return body as { users?: unknown[]; agents?: unknown[] };
       })
-      .catch(() => {})
+      .then((d) => {
+        setContacts([...(d.users || []), ...(d.agents || [])] as typeof contacts);
+        setContactsError(null);
+      })
+      .catch((err) => {
+        setContacts([]);
+        setContactsError(err instanceof Error ? err.message : "加载失败");
+      })
       .finally(() => setContactsLoading(false));
   }, [sidebarTab, sidebarOpen]);
 
@@ -674,6 +686,7 @@ function EditorPane({
                 memberPresence={memberPresence}
                 contacts={contacts}
                 contactsLoading={contactsLoading}
+                contactsError={contactsError}
                 addMemberMode={addMemberMode}
                 setAddMemberMode={setAddMemberMode}
                 newMemberId={newMemberId}
@@ -720,6 +733,7 @@ function EditorPane({
                 memberPresence={memberPresence}
                 contacts={contacts}
                 contactsLoading={contactsLoading}
+                contactsError={contactsError}
                 addMemberMode={addMemberMode}
                 setAddMemberMode={setAddMemberMode}
                 newMemberId={newMemberId}
@@ -802,6 +816,7 @@ function SidePanel({
   memberPresence,
   contacts,
   contactsLoading,
+  contactsError,
   addMemberMode,
   setAddMemberMode,
   newMemberId,
@@ -824,6 +839,7 @@ function SidePanel({
   memberPresence: Map<string, { foreground: boolean; fileId?: string }>;
   contacts: Array<{ subjectId: string; displayName: string; username: string; kind: "user" | "agent" }>;
   contactsLoading: boolean;
+  contactsError: string | null;
   addMemberMode: "picker" | "manual";
   setAddMemberMode: (m: "picker" | "manual") => void;
   newMemberId: string;
@@ -966,6 +982,10 @@ function SidePanel({
         {addMemberMode === "picker" ? (
           contactsLoading ? (
             <div className="text-[10px] text-muted-foreground py-2">载入联系人…</div>
+          ) : contactsError ? (
+            <div className="rounded border border-dashed border-destructive/40 p-2 text-[10px] text-muted-foreground">
+              读不到 CatsCo 好友：{contactsError}
+            </div>
           ) : contacts.length === 0 ? (
             <div className="rounded border border-dashed border-border/60 p-2 text-[10px] text-muted-foreground">
               CatsCo 里先加好友或建 bot
