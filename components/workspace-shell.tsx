@@ -24,7 +24,7 @@ import { EditorToolbar } from "@/components/editor/editor-toolbar";
 import OutlineSidebar from "@/components/editor/outline-sidebar";
 import VersionHistory from "@/components/editor/version-history";
 import { AskAgentDialog } from "@/components/ask-agent-dialog";
-import { AiChatPanel } from "@/components/ai-chat-panel";
+import { AgentAskDock } from "@/components/agent-ask-dock";
 import EditCommandBar from "@/components/editor/edit-command-bar";
 import { useEditStore } from "@/stores/edit-store";
 import DocumentListPane from "@/components/document-list-pane";
@@ -135,14 +135,10 @@ export default function WorkspaceShell() {
 
   return (
     <div className="relative h-screen w-full overflow-hidden bg-background text-foreground">
-      {/* Canvas layer — main content (shrinks right when the AI panel opens) */}
-      <div
-        className={cn(
-          "absolute inset-0 transition-all duration-200 ease-out-quint",
-          aiOpen && "canvas-retreat",
-          aiOpen && "right-[360px]"
-        )}
-      >
+      {/* Canvas layer — main content.
+          The ask dock floats over this rather than docking beside it: it is an
+          interruption, not a workspace, so the document keeps its full width. */}
+      <div className="absolute inset-0">
         {loading ? (
           <LoadingPane />
         ) : !actor ? (
@@ -158,23 +154,14 @@ export default function WorkspaceShell() {
         )}
       </div>
 
-      {/* Dim layer — subtle veil when AI dock is engaged */}
-      <div
-        aria-hidden
-        className={cn(
-          "pointer-events-none absolute inset-0 bg-black/[0.03] transition-opacity duration-200",
-          aiOpen ? "opacity-100" : "opacity-0"
-        )}
-      />
-
-      {/* AI chat panel — right slide-over with intent threads + composer */}
+      {/* Ask dock — floating button, expanding to an input box. No thread list:
+          the answer to the newest ask is the only thing it shows. */}
       {actor && (
-        <AiChatPanel
+        <AgentAskDock
           open={aiOpen}
-          onClose={() => setPanelVisibility("ai", false)}
+          onOpenChange={(next) => setPanelVisibility("ai", next)}
           projectId={aiProjectId}
           fileId={aiFileId}
-          actorId={actor.id}
         />
       )}
 
@@ -213,7 +200,16 @@ function EditorPane({
   const [tapEnabled, setTapEnabled] = useState(false);
   const [currentContent, setCurrentContent] = useState("");
   const [cursorLine, setCursorLine] = useState<number | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  // The sidebar's visibility lives in the ui-store, not in local state.
+  //
+  // It used to be a local `useState`, which meant two things disagreed: page state
+  // broadcast `panelVisibility.sidebar` (so every other client and agent was told a
+  // constant), and a `set_panel_visibility` patch moved the store — which nothing
+  // rendered from — while the sidebar the user could see stayed put. That is the
+  // same shape as the view-mode toggle: state a patch cannot reach reads as "the
+  // assistant's UI commands don't work".
+  const sidebarOpen = useUiStore((s) => s.panelVisibility.sidebar);
+  const setPanelVisibility = useUiStore((s) => s.setPanelVisibility);
   const [sidebarTab, setSidebarTab] = useState<"outline" | "members" | "history">("outline");
   const [askOpen, setAskOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -258,27 +254,33 @@ function EditorPane({
     scheduleSave(content);
   };
 
-  // Right sidebar (大纲/成员) — persisted per project
+  // Right sidebar (大纲/成员) — persisted per project.
+  //
+  // The stored preference is applied *into the store*, so a restored session and a
+  // patched one travel the same path. No stored value means closed, which is what
+  // the local state used to default to.
   useEffect(() => {
     try {
       const v = localStorage.getItem(`sumi:sidebar:${projectId}`);
       if (v === "outline" || v === "members" || v === "history") {
-        setSidebarOpen(true);
+        setPanelVisibility("sidebar", true);
         setSidebarTab(v);
       } else if (v === "closed") {
-        setSidebarOpen(false);
+        setPanelVisibility("sidebar", false);
+      } else {
+        setPanelVisibility("sidebar", false);
       }
     } catch {
       /* private mode */
     }
-  }, [projectId]);
+  }, [projectId, setPanelVisibility]);
 
   const toggleSidebar = (tab?: "outline" | "members" | "history") => {
     const next = tab
       ? !(sidebarOpen && sidebarTab === tab)
       : !sidebarOpen;
     const nextTab = tab ?? sidebarTab;
-    setSidebarOpen(next);
+    setPanelVisibility("sidebar", next);
     if (tab) setSidebarTab(tab);
     try {
       localStorage.setItem(

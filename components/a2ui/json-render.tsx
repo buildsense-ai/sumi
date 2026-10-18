@@ -9,12 +9,15 @@
  *     elements: {
  *       c1: { type: "Card", props: {...}, children: ["t1","b1"] },
  *       t1: { type: "Text", props: { text: "…" } },
- *       b1: { type: "Button", props: { label:"打开", action:"open_document" } },
+ *       b1: { type: "Button", props: { label:"打开" } },
  *     }
  *   }
  *
- * We use the official shadcn component catalog + registry — 36 components
- * out of the box, no custom renderer code needed.
+ * We use the official shadcn component catalog + registry — 36 components out of
+ * the box — plus a small set of domain components for this workspace (documents,
+ * the outline, document counts). Those are what make generated UI feel native
+ * rather than generic: an agent can hand back the document's own outline instead of
+ * describing it in prose.
  */
 
 import { schema } from "@json-render/react/schema";
@@ -22,26 +25,69 @@ import { defineCatalog } from "@json-render/core";
 import { defineRegistry, Renderer } from "@json-render/react";
 import { shadcnComponents, shadcnComponentDefinitions } from "@json-render/shadcn";
 import { z } from "zod";
+import { parseSpec } from "@/lib/spec";
+import { runSpecAction } from "./action-runner";
+import { TableOfContentsView, DocumentStatsView } from "./domain-views";
 
 // ---------------------------------------------------------------------------
-// Catalog — merge our custom domain components with shadcn's built-ins
+// Catalog — our domain components plus shadcn's built-ins
 // ---------------------------------------------------------------------------
+
+const tocItem = z.object({
+  level: z.number().int().min(1).max(6),
+  text: z.string(),
+  /** 1-based line, needed for a clickable entry. */
+  line: z.number().int().min(1).optional(),
+});
 
 export const sumiCatalog = defineCatalog(schema, {
   components: {
-    // Domain-specific — keep for Sumi documents
     DocumentCard: {
       props: z.object({
         title: z.string(),
         filePath: z.string().optional(),
+        /** `${projectId}-${fileId}`; required for the card to be actionable. */
+        documentId: z.string().optional(),
         updatedAt: z.string().optional(),
         description: z.string().optional(),
       }),
       slots: [],
-      description: "A project document card — links into the workspace",
-      example: { title: "intro.md", filePath: "docs/intro.md" },
+      description: "A project document card — opens it in the editor",
+      example: {
+        title: "intro.md",
+        filePath: "docs/intro.md",
+        documentId: "prj_x-docs/intro.md",
+      },
     },
-    // Shadcn built-ins — the whole kit
+    TableOfContents: {
+      props: z.object({
+        title: z.string().optional(),
+        items: z.array(tocItem),
+        documentId: z.string().optional(),
+        activeLine: z.number().int().min(1).optional(),
+        progress: z.number().min(0).max(1).optional(),
+      }),
+      slots: [],
+      description:
+        "The document's heading outline — clickable when documentId is given",
+      example: {
+        title: "目录",
+        documentId: "prj_x-notes.md",
+        items: [{ level: 1, text: "引言", line: 1 }],
+      },
+    },
+    DocumentStats: {
+      props: z.object({
+        lines: z.number().optional(),
+        words: z.number().optional(),
+        chars: z.number().optional(),
+        headings: z.number().optional(),
+        readingMinutes: z.number().optional(),
+      }),
+      slots: [],
+      description: "Counts for the open document",
+      example: { lines: 120, words: 900, headings: 6 },
+    },
     ...shadcnComponentDefinitions,
   },
 
@@ -49,6 +95,13 @@ export const sumiCatalog = defineCatalog(schema, {
     open_document: {
       description: "Open a document in the editor",
       params: z.object({ documentId: z.string() }),
+    },
+    jump_to_line: {
+      description: "Scroll the editor to a line and place the cursor there",
+      params: z.object({
+        documentId: z.string(),
+        line: z.number().int().min(1),
+      }),
     },
     apply_pending_edit: {
       description: "Apply a pending edit by id",
@@ -66,15 +119,15 @@ export const sumiCatalog = defineCatalog(schema, {
 });
 
 // ---------------------------------------------------------------------------
-// Registry — use the official shadcn renderer components
+// Registry — renderers and action implementations
 // ---------------------------------------------------------------------------
 
 export const { registry, handlers, executeAction } = defineRegistry(sumiCatalog, {
   components: {
     // Shadcn's own implementations — full Radix UI + Tailwind
     ...shadcnComponents,
-    // Custom domain component — needs a renderer
-    DocumentCard: ({ props, emit }) => (
+
+    DocumentCard: ({ props }) => (
       <div className="group rounded-lg border border-border/60 bg-card px-3 py-2 transition-shadow hover:shadow-sm">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 flex-1">
@@ -96,36 +149,45 @@ export const { registry, handlers, executeAction } = defineRegistry(sumiCatalog,
             </div>
           )}
         </div>
-        {emit && (
+        {props.documentId ? (
           <button
-            onClick={() => emit("press")}
+            onClick={() =>
+              runSpecAction("open_document", { documentId: props.documentId })
+            }
             className="mt-2 rounded-md border border-border px-2 py-0.5 text-[10px] font-medium text-foreground hover:bg-accent"
           >
             打开
           </button>
-        )}
+        ) : null}
       </div>
     ),
+
+    // Presentation lives in ./domain-views so this file stays about wiring.
+    TableOfContents: ({ props }) => <TableOfContentsView props={props} />,
+    DocumentStats: ({ props }) => <DocumentStatsView props={props} />,
   },
 
+  // Every action resolves through the same validated path a component's click
+  // uses, so a Spec cannot open a `javascript:` URL or act on a document it did
+  // not name.
+  //
+  // These used to be console.log stubs: a generated button rendered fine and did
+  // nothing when pressed, which reads as broken UI rather than as an inert card.
   actions: {
     open_document: async (params) => {
-      console.log("[a2ui] open_document", params);
+      runSpecAction("open_document", params);
+    },
+    jump_to_line: async (params) => {
+      runSpecAction("jump_to_line", params);
     },
     apply_pending_edit: async (params) => {
-      console.log("[a2ui] apply_pending_edit", params);
+      runSpecAction("apply_pending_edit", params);
     },
     copy_to_clipboard: async (params) => {
-      const p = params as { text?: string } | undefined;
-      if (typeof navigator !== "undefined" && p?.text) {
-        await navigator.clipboard.writeText(String(p.text));
-      }
+      runSpecAction("copy_to_clipboard", params);
     },
     open_url: async (params) => {
-      const p = params as { url?: string } | undefined;
-      if (typeof window !== "undefined" && p?.url) {
-        window.open(String(p.url), "_blank", "noopener,noreferrer");
-      }
+      runSpecAction("open_url", params);
     },
   },
 });
@@ -141,35 +203,22 @@ export interface SumiSpecRendererProps {
 }
 
 export function SumiSpecRenderer({ spec, className }: SumiSpecRendererProps) {
-  const parsed = typeof spec === "string" ? safeParse(spec) : spec;
-  if (!parsed || typeof parsed !== "object") {
+  const parsed = parseSpec(spec);
+  if (!parsed) {
+    // Callers reach here with something Spec-shaped, so name the missing part
+    // instead of a generic parse failure.
     return (
       <div className="rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-[11px] text-destructive">
-        无法解析渲染指令
-      </div>
-    );
-  }
-  const specObj = parsed as { root?: string; elements?: Record<string, unknown> };
-  if (!specObj.root || !specObj.elements) {
-    return (
-      <div className="rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-[11px] text-destructive">
-        无效的 spec — 缺 root 或 elements
+        无法渲染这段 UI 指令 — 需要 root 与 elements
       </div>
     );
   }
   return (
     <div className={className}>
-      <Renderer spec={specObj as Parameters<typeof Renderer>[0]["spec"]} registry={registry} />
+      <Renderer
+        spec={parsed as Parameters<typeof Renderer>[0]["spec"]}
+        registry={registry}
+      />
     </div>
   );
-}
-
-function safeParse(text: string): unknown | null {
-  const t = text.trim();
-  if (!t.startsWith("{")) return null;
-  try {
-    return JSON.parse(t);
-  } catch {
-    return null;
-  }
 }
