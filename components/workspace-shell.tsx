@@ -12,6 +12,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { apiPath } from "@/lib/api-path";
+import { inviteUrl } from "@/lib/invite-link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { EditorView } from "@codemirror/view";
 import { useSession, getAuthHeaders } from "@/lib/use-session";
@@ -37,7 +38,7 @@ import { useDocPersistence } from "@/lib/use-doc-persistence";
 export default function WorkspaceShell() {
   const searchParams = useSearchParams();
   const documentId = searchParams.get("doc");
-  const inviteProjectId = searchParams.get("invite");
+  const inviteToken = searchParams.get("invite");
 
   const currentDocumentId = useUiStore((s) => s.currentDocumentId);
   const activeMainBlock = useUiStore((s) => s.activeMainBlock);
@@ -65,17 +66,17 @@ export default function WorkspaceShell() {
 
   const { actor, loading } = useSession();
 
-  // Invite link — ?invite=prj_x means "auto-join this project as viewer".
-  // Any authenticated user can redeem; the invite route adds them
-  // and the workspace reloads to show the new membership.
+  // Invite link — ?invite=<signed token> means "auto-join this project as
+  // viewer". The token vouches for the project; the route verifies it before
+  // creating a membership.
   useEffect(() => {
-    if (!inviteProjectId || !actor) return;
+    if (!inviteToken || !actor) return;
     const join = async () => {
       try {
         await fetch(apiPath("/api/invite/redeem"), {
           method: "POST",
           headers: { ...getAuthHeaders(), "Content-Type": "application/json" },
-          body: JSON.stringify({ projectId: inviteProjectId }),
+          body: JSON.stringify({ token: inviteToken }),
         });
       } catch {
         /* already a member or invite failed — still try to open */
@@ -87,7 +88,7 @@ export default function WorkspaceShell() {
       window.location.reload();
     };
     void join();
-  }, [inviteProjectId, actor]);
+  }, [inviteToken, actor]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape" && currentDocumentId) {
@@ -303,6 +304,8 @@ function EditorPane({
     Array<{ subjectId: string; displayName: string; username: string; kind: "user" | "agent" }>
   >([]);
   const [contactsLoading, setContactsLoading] = useState(false);
+  // Non-null when the roster could not be read — distinct from an empty roster.
+  const [contactsError, setContactsError] = useState<string | null>(null);
   const [addMemberMode, setAddMemberMode] = useState<"picker" | "manual">("picker");
   const [newMemberId, setNewMemberId] = useState("");
   const [newMemberRole, setNewMemberRole] = useState<"viewer" | "editor">("editor");
@@ -326,11 +329,21 @@ function EditorPane({
     if (sidebarTab !== "members" || !sidebarOpen) return;
     setContactsLoading(true);
     fetch(apiPath("/api/friends"), { headers: getAuthHeaders() })
-      .then((r) => (r.ok ? r.json() : { users: [], agents: [] }))
-      .then((d) => {
-        setContacts([...(d.users || []), ...(d.agents || [])]);
+      .then(async (r) => {
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          throw new Error(body?.detail || body?.error || `HTTP ${r.status}`);
+        }
+        return body as { users?: unknown[]; agents?: unknown[] };
       })
-      .catch(() => {})
+      .then((d) => {
+        setContacts([...(d.users || []), ...(d.agents || [])] as typeof contacts);
+        setContactsError(null);
+      })
+      .catch((err) => {
+        setContacts([]);
+        setContactsError(err instanceof Error ? err.message : "加载失败");
+      })
       .finally(() => setContactsLoading(false));
   }, [sidebarTab, sidebarOpen]);
 
@@ -674,6 +687,7 @@ function EditorPane({
                 memberPresence={memberPresence}
                 contacts={contacts}
                 contactsLoading={contactsLoading}
+                contactsError={contactsError}
                 addMemberMode={addMemberMode}
                 setAddMemberMode={setAddMemberMode}
                 newMemberId={newMemberId}
@@ -720,6 +734,7 @@ function EditorPane({
                 memberPresence={memberPresence}
                 contacts={contacts}
                 contactsLoading={contactsLoading}
+                contactsError={contactsError}
                 addMemberMode={addMemberMode}
                 setAddMemberMode={setAddMemberMode}
                 newMemberId={newMemberId}
@@ -802,6 +817,7 @@ function SidePanel({
   memberPresence,
   contacts,
   contactsLoading,
+  contactsError,
   addMemberMode,
   setAddMemberMode,
   newMemberId,
@@ -824,6 +840,7 @@ function SidePanel({
   memberPresence: Map<string, { foreground: boolean; fileId?: string }>;
   contacts: Array<{ subjectId: string; displayName: string; username: string; kind: "user" | "agent" }>;
   contactsLoading: boolean;
+  contactsError: string | null;
   addMemberMode: "picker" | "manual";
   setAddMemberMode: (m: "picker" | "manual") => void;
   newMemberId: string;
@@ -966,6 +983,10 @@ function SidePanel({
         {addMemberMode === "picker" ? (
           contactsLoading ? (
             <div className="text-[10px] text-muted-foreground py-2">载入联系人…</div>
+          ) : contactsError ? (
+            <div className="rounded border border-dashed border-destructive/40 p-2 text-[10px] text-muted-foreground">
+              读不到 CatsCo 好友：{contactsError}
+            </div>
           ) : contacts.length === 0 ? (
             <div className="rounded border border-dashed border-border/60 p-2 text-[10px] text-muted-foreground">
               CatsCo 里先加好友或建 bot
@@ -1030,8 +1051,27 @@ function SidePanel({
         {/* Invite link */}
         <button
           onClick={() => {
-            const url = `${window.location.origin}/?invite=${projectId}`;
-            void navigator.clipboard.writeText(url);
+            // Ask the server for a signed token first: the link is the
+            // capability now, and a bare project id is not one. inviteUrl then
+            // keeps the deployment base path — a bare origin+"/?invite=…"
+            // 404s behind the artifact gateway.
+            const mint = async () => {
+              try {
+                const res = await fetch(apiPath(`/api/projects/${projectId}/invite`), {
+                  method: "POST",
+                  headers: getAuthHeaders(),
+                });
+                if (!res.ok) return;
+                const { token } = (await res.json()) as { token?: string };
+                if (!token) return;
+                await navigator.clipboard.writeText(
+                  inviteUrl(token, window.location.origin)
+                );
+              } catch {
+                /* clipboard or mint failed — nothing copied */
+              }
+            };
+            void mint();
           }}
           className="mt-2 w-full rounded-md border border-border/60 px-2 py-1 text-[10px] font-medium text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
           title="复制邀请链接"
